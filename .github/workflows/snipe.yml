@@ -43,6 +43,7 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Watch and book
         if: steps.guard.outputs.skip == 'false'
@@ -62,13 +63,23 @@ jobs:
       # trigger new runs, hence a PAT. Without SNIPE_PAT this step no-ops and
       # you fall back to the unreliable cron.
       - name: Start the next watch
-        if: always() && hashFiles('BOOKED.json') == ''
+        # Only the run that actually watched may start a successor. Without the
+        # guard check, a skipped run would dispatch another skipped run and
+        # spin in a tight loop.
+        if: always() && steps.guard.outputs.skip == 'false' && hashFiles('BOOKED.json') == ''
         env:
           GH_TOKEN: ${{ secrets.SNIPE_PAT }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "No SNIPE_PAT secret - cannot self-restart; relying on cron."
             exit 0
+          fi
+          # If this watch died early (bad credentials, API outage) restarting at
+          # once would hammer Actions. Floor the restart interval at a minute.
+          elapsed=$(( $(date +%s) - START_EPOCH ))
+          if [ "$elapsed" -lt 60 ]; then
+            echo "watch only lasted ${elapsed}s - backing off before restart"
+            sleep 60
           fi
           gh workflow run snipe.yml --repo "${{ github.repository }}"
           echo "next watch dispatched"
