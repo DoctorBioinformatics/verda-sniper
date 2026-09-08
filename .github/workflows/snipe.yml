@@ -1,8 +1,11 @@
 name: snipe
 
-# Runs every 10 minutes; each run polls for ~9 minutes, so coverage is
-# effectively continuous. Overlapping runs are harmless - the script refuses
-# to book if the project already has an instance.
+# GitHub's cron is unreliable at high frequency - it deprioritises and silently
+# skips scheduled runs under load. So this does NOT depend on cron firing
+# punctually. Each run watches for ~5h50m (just under the 6h job limit), and the
+# cron only needs to land occasionally to start the next long watch. A guard
+# step exits immediately if another watch is already running, so the frequent
+# cron attempts are cheap rather than duplicated.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -16,21 +19,40 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: read
 
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if a watch is already running
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THIS_RUN: ${{ github.run_id }}
+        run: |
+          others=$(gh run list --workflow=snipe.yml --status=in_progress \
+                     --limit 20 --json databaseId --jq \
+                     "[.[] | select(.databaseId != ${THIS_RUN})] | length")
+          echo "other watches running: $others"
+          if [ "${others:-0}" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Watch and book
+        if: steps.guard.outputs.skip == 'false'
         env:
           VERDA_CLIENT_ID: ${{ secrets.VERDA_CLIENT_ID }}
           VERDA_CLIENT_SECRET: ${{ secrets.VERDA_CLIENT_SECRET }}
           VERDA_POLL_SECONDS: "10"
-          # A dry run only needs to prove auth + lookups, so keep it short.
-          VERDA_RUN_SECONDS: ${{ inputs.dry_run && '30' || '540' }}
+          # ~5h50m, just under the 6h job limit. A dry run only needs to prove
+          # auth and the image/key lookups, so keep that short.
+          VERDA_RUN_SECONDS: ${{ inputs.dry_run && '30' || '21000' }}
           VERDA_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python3 verda_sniper.py
 
