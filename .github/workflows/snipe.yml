@@ -29,7 +29,8 @@ jobs:
           VERDA_CLIENT_ID: ${{ secrets.VERDA_CLIENT_ID }}
           VERDA_CLIENT_SECRET: ${{ secrets.VERDA_CLIENT_SECRET }}
           VERDA_POLL_SECONDS: "10"
-          VERDA_RUN_SECONDS: "540"
+          # A dry run only needs to prove auth + lookups, so keep it short.
+          VERDA_RUN_SECONDS: ${{ inputs.dry_run && '30' || '540' }}
           VERDA_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python3 verda_sniper.py
 
