@@ -1,0 +1,51 @@
+name: snipe
+
+# Runs every 10 minutes; each run polls for ~9 minutes, so coverage is
+# effectively continuous. Overlapping runs are harmless - the script refuses
+# to book if the project already has an instance.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log what it would book, without booking"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Watch and book
+        env:
+          VERDA_CLIENT_ID: ${{ secrets.VERDA_CLIENT_ID }}
+          VERDA_CLIENT_SECRET: ${{ secrets.VERDA_CLIENT_SECRET }}
+          VERDA_POLL_SECONDS: "10"
+          VERDA_RUN_SECONDS: "540"
+          VERDA_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: python3 verda_sniper.py
+
+      - name: Tell me it booked
+        if: hashFiles('BOOKED.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "The sniper booked an RTX A6000."
+            echo
+            echo '```json'
+            cat BOOKED.json
+            echo '```'
+            echo
+            echo "Next: rsync the code to /root/ac2 and run scripts/verda_bootstrap.sh."
+            echo "Top up the balance - it is metered and a drained balance deletes the box."
+          } > issue.md
+          gh issue create --title "Verda A6000 BOOKED" --body-file issue.md
