@@ -35,6 +35,8 @@ OS_DISK_GB = int(os.environ.get("VERDA_OS_DISK_GB", "100"))
 POLL_SECONDS = float(os.environ.get("VERDA_POLL_SECONDS", "5"))
 RUN_SECONDS = float(os.environ.get("VERDA_RUN_SECONDS", "540"))
 DRY_RUN = os.environ.get("VERDA_DRY_RUN") == "1"
+# Fire the real POST once, even with no stock, to prove the payload is accepted.
+PROBE = os.environ.get("VERDA_PROBE") == "1"
 
 _LAST_SEEN = None
 
@@ -194,6 +196,58 @@ def describe(v, created):
     return {"id": created}
 
 
+def probe(v):
+    """Fire the real booking POST to prove the payload shape is accepted.
+
+    The booking call had only ever been checked against the API spec, never
+    actually sent. This sends it for real. If stock exists it books (which is
+    the whole point). If not, Verda rejects it - and the *reason* is the proof:
+    "not available" means our payload was understood and only stock was
+    missing, while a 4xx naming a field means the payload is malformed and the
+    watcher would have failed at the moment it mattered.
+    """
+    running = existing_instances(v)
+    if running:
+        log(f"instance already exists ({[r.get('hostname') for r in running]}); not probing")
+        return 0
+    image_id, key_ids = resolve(v)
+    payload = {
+        "instance_type": INSTANCE_TYPE,
+        "image": image_id,
+        "ssh_key_ids": key_ids,
+        "hostname": HOSTNAME,
+        "description": f"{HOSTNAME} (auto-booked by verda-sniper)",
+        "location_code": os.environ.get("VERDA_PROBE_LOCATION", "FIN-02"),
+        "os_volume": {"name": f"{HOSTNAME}-os", "size": OS_DISK_GB},
+        "is_spot": False,
+    }
+    log(f"PROBE: POST /instances {json.dumps(payload)}")
+    try:
+        created = v.post("/instances", payload)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:600]
+        log(f"PROBE RESULT {e.code}: {body}")
+        low = body.lower()
+        if "avail" in low or "capacity" in low or "stock" in low or "sold" in low:
+            log("VERDICT: payload ACCEPTED - rejected only for lack of stock. "
+                "The booking call is correct and will work when an A6000 frees up.")
+            return 0
+        log("VERDICT: payload REJECTED on its own merits - this is a real bug. "
+            "The watcher would have failed at the moment it mattered.")
+        return 4
+    inst_id = created if isinstance(created, str) else (created or {}).get("id")
+    info = describe(v, inst_id)
+    result = {"booked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+              "instance_type": INSTANCE_TYPE, "id": inst_id,
+              "hostname": info.get("hostname", HOSTNAME),
+              "ip": info.get("ip") or info.get("public_ip") or "pending",
+              "via": "probe"}
+    log("PROBE BOOKED IT: " + json.dumps(result))
+    with open("BOOKED.json", "w") as fh:
+        json.dump(result, fh, indent=2)
+    return 0
+
+
 def main():
     cid = os.environ.get("VERDA_CLIENT_ID")
     secret = os.environ.get("VERDA_CLIENT_SECRET")
@@ -207,6 +261,9 @@ def main():
         log(f"An instance already exists ({[r.get('hostname') for r in running]}). "
             "Nothing to do — refusing to book a second one.")
         return 0
+
+    if PROBE:
+        return probe(v)
 
     alive, _ = check_feed_alive(v)
     if not alive:

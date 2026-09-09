@@ -15,6 +15,10 @@ on:
         description: "Log what it would book, without booking"
         type: boolean
         default: false
+      probe:
+        description: "Fire the real booking POST once to prove it is accepted (books if stock exists)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,7 +50,7 @@ jobs:
           echo "START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Watch and book
-        if: steps.guard.outputs.skip == 'false'
+        if: steps.guard.outputs.skip == 'false' || inputs.probe
         env:
           VERDA_CLIENT_ID: ${{ secrets.VERDA_CLIENT_ID }}
           VERDA_CLIENT_SECRET: ${{ secrets.VERDA_CLIENT_SECRET }}
@@ -55,6 +59,7 @@ jobs:
           # auth and the image/key lookups, so keep that short.
           VERDA_RUN_SECONDS: ${{ inputs.dry_run && '30' || '21000' }}
           VERDA_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          VERDA_PROBE: ${{ inputs.probe && '1' || '0' }}
         run: python3 verda_sniper.py
 
       # A watch lasts ~6h and then must be restarted. GitHub's cron cannot be
@@ -66,7 +71,7 @@ jobs:
         # Only the run that actually watched may start a successor. Without the
         # guard check, a skipped run would dispatch another skipped run and
         # spin in a tight loop.
-        if: always() && steps.guard.outputs.skip == 'false' && hashFiles('BOOKED.json') == ''
+        if: always() && !inputs.probe && steps.guard.outputs.skip == 'false' && hashFiles('BOOKED.json') == ''
         env:
           GH_TOKEN: ${{ secrets.SNIPE_PAT }}
         run: |
