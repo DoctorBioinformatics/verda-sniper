@@ -84,6 +84,30 @@ jobs:
           gh workflow run snipe.yml --repo "${{ github.repository }}"
           echo "next watch dispatched"
 
+      - name: Tell me it went blind or could not book
+        if: always() && (hashFiles('BOOK_FAILED.json') != '' || failure())
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "The A6000 watcher needs attention."
+            echo
+            if [ -f BOOK_FAILED.json ]; then
+              echo "It SAW an available A6000 and failed to book it:"
+              echo '```json'
+              cat BOOK_FAILED.json
+              echo '```'
+              echo "Most likely the Verda balance is too low."
+            else
+              echo "The run failed. If the log says FEED DEAD, the availability"
+              echo "query is broken and the watcher is blind - it will report"
+              echo "'no stock' forever until that is fixed."
+            fi
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > alert.md
+          gh issue create --title "A6000 watcher needs attention" --body-file alert.md
+
       - name: Tell me it booked
         if: hashFiles('BOOKED.json') != ''
         env:

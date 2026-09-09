@@ -32,7 +32,7 @@ IMAGE_NAME = os.environ.get("VERDA_IMAGE_NAME", "Ubuntu 24.04 + CUDA 12.8 Open +
 SSH_KEY_NAME = os.environ.get("VERDA_SSH_KEY_NAME", "ac2-verda")
 HOSTNAME = os.environ.get("VERDA_HOSTNAME", "ac2-prod")
 OS_DISK_GB = int(os.environ.get("VERDA_OS_DISK_GB", "100"))
-POLL_SECONDS = float(os.environ.get("VERDA_POLL_SECONDS", "10"))
+POLL_SECONDS = float(os.environ.get("VERDA_POLL_SECONDS", "5"))
 RUN_SECONDS = float(os.environ.get("VERDA_RUN_SECONDS", "540"))
 DRY_RUN = os.environ.get("VERDA_DRY_RUN") == "1"
 
@@ -96,6 +96,37 @@ def locations_with(payload, itype):
         if isinstance(avail, list) and itype in avail:
             found.append(loc)
     return found
+
+
+def all_types(payload):
+    """Every instance type the availability feed currently reports, any location."""
+    out = set()
+    for e in (payload if isinstance(payload, list) else []):
+        if isinstance(e, dict):
+            for x in (e.get("availabilities") or e.get("available")
+                      or e.get("instance_types") or []):
+                out.add(x)
+    return sorted(out)
+
+
+def check_feed_alive(v):
+    """Fail loudly if the availability feed reports nothing at all.
+
+    A `?is_spot=false` filter once made this endpoint return nothing, and
+    "no types anywhere" is indistinguishable from "no stock" - so the watcher
+    polled blind for 32 hours while the console showed an A6000 free. Verda
+    always has something available somewhere, so an empty feed means the query
+    is wrong. Treat it as a hard error, never as scarcity.
+    """
+    payload = v.get("/instance-availability")
+    types = all_types(payload)
+    if not types:
+        log("FEED DEAD: /instance-availability reported zero instance types "
+            "across all locations. That is a broken query, not sold-out stock. "
+            f"Raw payload: {json.dumps(payload)[:400]}")
+        return False, types
+    log(f"feed healthy: {len(types)} instance types available right now: {types}")
+    return True, types
 
 
 def existing_instances(v):
@@ -177,6 +208,11 @@ def main():
             "Nothing to do — refusing to book a second one.")
         return 0
 
+    alive, _ = check_feed_alive(v)
+    if not alive:
+        log("refusing to watch blind - fix the availability query first")
+        return 3
+
     image_id, key_ids = resolve(v)
     log(f"watching for {INSTANCE_TYPE}, polling every {POLL_SECONDS}s "
         f"for {RUN_SECONDS}s")
@@ -193,13 +229,16 @@ def main():
             locs = locations_with(payload, INSTANCE_TYPE)
             # Log the available set whenever it changes, so a mismatch between
             # what the console shows and what we parse can never hide again.
-            seen = sorted({t for e in (payload if isinstance(payload, list) else [])
-                           if isinstance(e, dict)
-                           for t in (e.get("availabilities") or [])})
+            seen = all_types(payload)
             global _LAST_SEEN
             if seen != _LAST_SEEN:
                 log(f"available now ({len(seen)}): {seen}")
                 _LAST_SEEN = seen
+            if not seen:
+                # The feed went blind mid-run. Bail so the run fails visibly
+                # rather than quietly reporting no stock for six hours.
+                log("FEED DEAD mid-run: zero instance types reported")
+                return 3
         except urllib.error.HTTPError as e:
             log(f"poll error {e.code}: {e.read().decode()[:200]}")
             time.sleep(POLL_SECONDS)
@@ -220,6 +259,12 @@ def main():
             except urllib.error.HTTPError as e:
                 detail = e.read().decode()[:400]
                 log(f"BOOK FAILED {e.code}: {detail}")
+                # Seeing stock and failing to take it is the expensive case, so
+                # it must page the user rather than scroll past in a log.
+                with open("BOOK_FAILED.json", "w") as fh:
+                    json.dump({"at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                               "http_status": e.code, "detail": detail,
+                               "location": locs[0]}, fh, indent=2)
                 # Stock may have gone in the last second, or balance is too low.
                 time.sleep(POLL_SECONDS)
                 continue
