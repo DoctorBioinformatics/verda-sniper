@@ -31,6 +31,8 @@ INSTANCE_TYPE = os.environ.get("VERDA_INSTANCE_TYPE", "1A6000.10V")
 IMAGE_NAME = os.environ.get("VERDA_IMAGE_NAME", "Ubuntu 24.04 + CUDA 12.8 Open + Docker")
 SSH_KEY_NAME = os.environ.get("VERDA_SSH_KEY_NAME", "ac2-verda")
 HOSTNAME = os.environ.get("VERDA_HOSTNAME", "ac2-prod")
+STARTUP_SCRIPT = os.environ.get("VERDA_STARTUP_SCRIPT", "startup.sh")
+STARTUP_NAME = os.environ.get("VERDA_STARTUP_NAME", "ac2-autoprovision")
 OS_DISK_GB = int(os.environ.get("VERDA_OS_DISK_GB", "100"))
 POLL_SECONDS = float(os.environ.get("VERDA_POLL_SECONDS", "5"))
 RUN_SECONDS = float(os.environ.get("VERDA_RUN_SECONDS", "540"))
@@ -131,6 +133,44 @@ def check_feed_alive(v):
     return True, types
 
 
+def ensure_startup_script(v):
+    """Upload the provisioning script to Verda and return its id.
+
+    Attached to the booking so a freshly caught box installs Ollama, pulls the
+    four models and warms them on its own. Re-uploads when the local file
+    changes, so editing startup.sh is all it takes to change what a new box
+    does. Returns None on failure - a box booked without provisioning still
+    beats no box.
+    """
+    path = Path(STARTUP_SCRIPT) if False else None
+    try:
+        with open(STARTUP_SCRIPT) as fh:
+            body = fh.read()
+    except OSError as e:
+        log(f"WARN no startup script ({e}); booking without provisioning")
+        return None
+    try:
+        existing = v.get("/scripts") or []
+        for s in existing:
+            if s.get("name") == STARTUP_NAME:
+                if (s.get("script") or "") == body:
+                    log(f"startup script up to date -> {s.get('id')}")
+                    return s.get("id")
+                log("startup script changed; replacing")
+                try:
+                    v._call(f"/scripts/{s.get('id')}", token=v.token(), method="DELETE")
+                except Exception as e:
+                    log(f"WARN could not delete old script: {e}")
+                break
+        created = v.post("/scripts", {"name": STARTUP_NAME, "script": body})
+        sid = created if isinstance(created, str) else (created or {}).get("id")
+        log(f"startup script uploaded -> {sid}")
+        return sid
+    except Exception as e:
+        log(f"WARN startup script upload failed ({e}); booking without provisioning")
+        return None
+
+
 def existing_instances(v):
     """Instances that already exist and are not being torn down."""
     try:
@@ -167,7 +207,7 @@ def resolve(v):
     return image_id, key_ids
 
 
-def book(v, image_id, key_ids, location):
+def book(v, image_id, key_ids, location, startup_id=None):
     payload = {
         "instance_type": INSTANCE_TYPE,
         "image": image_id,
@@ -178,6 +218,8 @@ def book(v, image_id, key_ids, location):
         "os_volume": {"name": f"{HOSTNAME}-os", "size": OS_DISK_GB},
         "is_spot": False,
     }
+    if startup_id:
+        payload["startup_script_id"] = startup_id
     if DRY_RUN:
         log(f"DRY RUN — would POST /instances {json.dumps(payload)}")
         return {"dry_run": True, **payload}
@@ -211,6 +253,7 @@ def probe(v):
         log(f"instance already exists ({[r.get('hostname') for r in running]}); not probing")
         return 0
     image_id, key_ids = resolve(v)
+    startup_id = ensure_startup_script(v)
     payload = {
         "instance_type": INSTANCE_TYPE,
         "image": image_id,
@@ -221,6 +264,8 @@ def probe(v):
         "os_volume": {"name": f"{HOSTNAME}-os", "size": OS_DISK_GB},
         "is_spot": False,
     }
+    if startup_id:
+        payload["startup_script_id"] = startup_id
     log(f"PROBE: POST /instances {json.dumps(payload)}")
     try:
         created = v.post("/instances", payload)
@@ -271,6 +316,7 @@ def main():
         return 3
 
     image_id, key_ids = resolve(v)
+    startup_id = ensure_startup_script(v)
     log(f"watching for {INSTANCE_TYPE}, polling every {POLL_SECONDS}s "
         f"for {RUN_SECONDS}s")
 
@@ -312,7 +358,7 @@ def main():
                 log("another run booked it first — standing down")
                 return 0
             try:
-                created = book(v, image_id, key_ids, locs[0])
+                created = book(v, image_id, key_ids, locs[0], startup_id)
             except urllib.error.HTTPError as e:
                 detail = e.read().decode()[:400]
                 log(f"BOOK FAILED {e.code}: {detail}")
