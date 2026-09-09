@@ -65,7 +65,16 @@ class Verda:
             req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode()
-        return json.loads(raw) if raw else None
+        raw = raw.strip()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Some endpoints answer with a bare id rather than JSON. Hand the
+            # text back instead of blowing up - a parse error here once cost
+            # the startup script upload.
+            return raw.strip('"')
 
     def token(self):
         # Refresh a minute before expiry so a long loop never dies mid-poll.
@@ -166,8 +175,13 @@ def ensure_startup_script(v):
         sid = created if isinstance(created, str) else (created or {}).get("id")
         log(f"startup script uploaded -> {sid}")
         return sid
+    except urllib.error.HTTPError as e:
+        log(f"WARN startup script upload failed HTTP {e.code}: "
+            f"{e.read().decode()[:300]}; booking without provisioning")
+        return None
     except Exception as e:
-        log(f"WARN startup script upload failed ({e}); booking without provisioning")
+        log(f"WARN startup script upload failed ({type(e).__name__}: {e}); "
+            "booking without provisioning")
         return None
 
 
