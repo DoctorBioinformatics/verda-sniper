@@ -241,15 +241,39 @@ def book(v, image_id, key_ids, location, startup_id=None):
     return v.post("/instances", payload)
 
 
-def describe(v, created):
-    """Best-effort fetch of the new instance's IP for the notification."""
-    try:
-        for row in existing_instances(v):
-            if row.get("hostname") == HOSTNAME or row.get("id") == created:
-                return row
-    except Exception:
-        pass
-    return {"id": created}
+def _row_ip(row):
+    return row.get("ip") or row.get("public_ip") or ""
+
+
+def describe(v, created, wait_seconds=None):
+    """Fetch the new instance's row, waiting for its IP to be assigned.
+
+    Verda returns from POST /instances before the box has an address, so a
+    single immediate lookup reports `"ip": "pending"` - which is exactly the
+    one fact the notification exists to carry. So poll until an IP appears.
+    The instance is already booked by this point, so waiting costs nothing
+    that matters; the loop is bounded so a Verda quirk can never hang the run.
+    """
+    if wait_seconds is None:
+        wait_seconds = float(os.environ.get("VERDA_IP_WAIT_SECONDS", "240"))
+    deadline = time.time() + wait_seconds
+    last = {"id": created}
+    while True:
+        try:
+            for row in existing_instances(v):
+                if row.get("id") == created or row.get("hostname") == HOSTNAME:
+                    last = row
+                    if _row_ip(row):
+                        log(f"instance {created} has ip {_row_ip(row)}")
+                        return row
+                    break
+        except Exception as e:
+            log(f"WARN could not read back the new instance ({e})")
+        if time.time() >= deadline:
+            log(f"WARN no ip for {created} after {wait_seconds:.0f}s - "
+                "reporting it as pending; look it up in the console")
+            return last
+        time.sleep(10)
 
 
 def probe(v):
@@ -299,7 +323,7 @@ def probe(v):
     result = {"booked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
               "instance_type": INSTANCE_TYPE, "id": inst_id,
               "hostname": info.get("hostname", HOSTNAME),
-              "ip": info.get("ip") or info.get("public_ip") or "pending",
+              "ip": _row_ip(info) or "pending",
               "via": "probe"}
     log("PROBE BOOKED IT: " + json.dumps(result))
     with open("BOOKED.json", "w") as fh:
@@ -393,7 +417,7 @@ def main():
                 "location": locs[0],
                 "id": inst_id,
                 "hostname": info.get("hostname", HOSTNAME),
-                "ip": info.get("ip") or info.get("public_ip") or "pending",
+                "ip": _row_ip(info) or "pending",
                 "dry_run": DRY_RUN,
             }
             log("BOOKED: " + json.dumps(result))
