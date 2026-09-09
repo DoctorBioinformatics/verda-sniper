@@ -36,6 +36,8 @@ POLL_SECONDS = float(os.environ.get("VERDA_POLL_SECONDS", "10"))
 RUN_SECONDS = float(os.environ.get("VERDA_RUN_SECONDS", "540"))
 DRY_RUN = os.environ.get("VERDA_DRY_RUN") == "1"
 
+_LAST_SEEN = None
+
 
 def log(msg):
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
@@ -184,8 +186,20 @@ def main():
     while time.time() < deadline:
         polls += 1
         try:
-            payload = v.get("/instance-availability?is_spot=false")
+            # No query params. `?is_spot=false` was silently returning nothing,
+            # which is indistinguishable from "no stock" - it cost 32 hours of
+            # blind polling while the console showed A6000 available.
+            payload = v.get("/instance-availability")
             locs = locations_with(payload, INSTANCE_TYPE)
+            # Log the available set whenever it changes, so a mismatch between
+            # what the console shows and what we parse can never hide again.
+            seen = sorted({t for e in (payload if isinstance(payload, list) else [])
+                           if isinstance(e, dict)
+                           for t in (e.get("availabilities") or [])})
+            global _LAST_SEEN
+            if seen != _LAST_SEEN:
+                log(f"available now ({len(seen)}): {seen}")
+                _LAST_SEEN = seen
         except urllib.error.HTTPError as e:
             log(f"poll error {e.code}: {e.read().decode()[:200]}")
             time.sleep(POLL_SECONDS)
