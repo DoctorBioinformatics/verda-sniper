@@ -365,16 +365,18 @@ def main():
 
     v = Verda(cid, secret)
 
+    # Before the 'box already exists' exit: check mode must work while a box is
+    # up, or it can never verify the booking inputs outside a stock window.
+    if CHECK:
+        image_id, key_ids = resolve(v)
+        log(f"CHECK OK: would book {INSTANCE_TYPE} with image {image_id}, keys {key_ids}")
+        return 0
+
     running = existing_instances(v)
     if running:
         log(f"An instance already exists ({[r.get('hostname') for r in running]}). "
             "Nothing to do — refusing to book a second one.")
         open("INSTANCE_EXISTS", "w").close()
-        return 0
-
-    if CHECK:
-        image_id, key_ids = resolve(v)
-        log(f"CHECK OK: would book {INSTANCE_TYPE} with image {image_id}, keys {key_ids}")
         return 0
 
     if PROBE:
