@@ -39,6 +39,10 @@ RUN_SECONDS = float(os.environ.get("VERDA_RUN_SECONDS", "540"))
 DRY_RUN = os.environ.get("VERDA_DRY_RUN") == "1"
 # Fire the real POST once, even with no stock, to prove the payload is accepted.
 PROBE = os.environ.get("VERDA_PROBE") == "1"
+# Resolve image + ssh key and print what Verda allows, then exit. Books nothing,
+# and runs even when a box already exists, so the booking inputs can be
+# verified at any time without waiting for stock.
+CHECK = os.environ.get("VERDA_CHECK") == "1"
 
 _LAST_SEEN = None
 
@@ -199,17 +203,39 @@ def existing_instances(v):
 
 def resolve(v):
     """Look up the image id and ssh key id by name, so nothing is hardcoded."""
-    images = v.get("/images") or []
-    image_id = None
-    for img in images:
-        name = f"{img.get('name', '')} {img.get('image_type', '')}".strip()
-        if IMAGE_NAME.lower() in name.lower():
-            image_id = img.get("id") or img.get("image_type")
-            log(f"image: {name} -> {image_id}")
-            break
-    if not image_id:
-        names = [i.get("name") for i in images][:20]
-        raise SystemExit(f"No image matching {IMAGE_NAME!r}. Available: {names}")
+    # Ask Verda which images are valid for THIS instance type. Picking from the
+    # global list chose "CUDA 12.8 Open + Docker", which Verda rejects on the
+    # A6000 with 400 "Operating system is not valid for this instance type" -
+    # and it only surfaced when stock existed, so it cost a real window.
+    images = v.get(f"/images?instance_type={INSTANCE_TYPE}") or []
+    def label(img):
+        return f"{img.get('name', '')} {img.get('image_type', '')}".strip()
+    valid = [i for i in images if isinstance(i, dict)]
+    log(f"images valid for {INSTANCE_TYPE} ({len(valid)}): {[label(i) for i in valid]}")
+    if not valid:
+        raise SystemExit(f"Verda lists no valid images for {INSTANCE_TYPE}")
+
+    def pick():
+        # Exact configured image first, if Verda allows it on this GPU.
+        for img in valid:
+            if IMAGE_NAME.lower() in label(img).lower():
+                return img, "configured"
+        # Otherwise the closest plain Ubuntu + Docker image, avoiding
+        # Kubernetes/Jupyter variants that pre-install unneeded stacks.
+        def score(img):
+            s = label(img).lower()
+            return (("ubuntu" in s) * 4 + ("docker" in s) * 2
+                    - ("kubernetes" in s) * 3 - ("jupyter" in s) * 3
+                    + ("24.04" in s) * 1)
+        best = max(valid, key=score)
+        return best, "fallback"
+
+    img, how = pick()
+    image_id = img.get("id") or img.get("image_type")
+    if how == "fallback":
+        log(f"WARN configured image {IMAGE_NAME!r} is NOT valid for {INSTANCE_TYPE}; "
+            f"using {label(img)!r} instead")
+    log(f"image ({how}): {label(img)} -> {image_id}")
 
     keys = v.get("/sshkeys") or []
     key_ids = [k.get("id") for k in keys
@@ -343,6 +369,12 @@ def main():
     if running:
         log(f"An instance already exists ({[r.get('hostname') for r in running]}). "
             "Nothing to do — refusing to book a second one.")
+        open("INSTANCE_EXISTS", "w").close()
+        return 0
+
+    if CHECK:
+        image_id, key_ids = resolve(v)
+        log(f"CHECK OK: would book {INSTANCE_TYPE} with image {image_id}, keys {key_ids}")
         return 0
 
     if PROBE:
@@ -394,6 +426,7 @@ def main():
             # Re-check right before spending: another run may have just booked.
             if existing_instances(v):
                 log("another run booked it first — standing down")
+                open("INSTANCE_EXISTS", "w").close()
                 return 0
             try:
                 created = book(v, image_id, key_ids, locs[0], startup_id)

@@ -19,6 +19,10 @@ on:
         description: "Fire the real booking POST once to prove it is accepted (books if stock exists)"
         type: boolean
         default: false
+      check:
+        description: "Only resolve image + SSH key and list what Verda allows; books nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -50,7 +54,7 @@ jobs:
           echo "START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Watch and book
-        if: steps.guard.outputs.skip == 'false' || inputs.probe
+        if: steps.guard.outputs.skip == 'false' || inputs.probe || inputs.check
         env:
           VERDA_CLIENT_ID: ${{ secrets.VERDA_CLIENT_ID }}
           VERDA_CLIENT_SECRET: ${{ secrets.VERDA_CLIENT_SECRET }}
@@ -60,6 +64,7 @@ jobs:
           VERDA_RUN_SECONDS: ${{ inputs.dry_run && '30' || '21000' }}
           VERDA_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           VERDA_PROBE: ${{ inputs.probe && '1' || '0' }}
+          VERDA_CHECK: ${{ inputs.check && '1' || '0' }}
         run: python3 verda_sniper.py
 
       # A watch lasts ~6h and then must be restarted. GitHub's cron cannot be
@@ -71,7 +76,7 @@ jobs:
         # Only the run that actually watched may start a successor. Without the
         # guard check, a skipped run would dispatch another skipped run and
         # spin in a tight loop.
-        if: always() && !inputs.probe && steps.guard.outputs.skip == 'false' && hashFiles('BOOKED.json') == ''
+        if: always() && !inputs.probe && !inputs.check && steps.guard.outputs.skip == 'false' && hashFiles('BOOKED.json') == '' && hashFiles('INSTANCE_EXISTS') == ''
         env:
           GH_TOKEN: ${{ secrets.SNIPE_PAT }}
         run: |
@@ -102,7 +107,9 @@ jobs:
               echo '```json'
               cat BOOK_FAILED.json
               echo '```'
-              echo "Most likely the Verda balance is too low."
+              echo "Read the detail above - it is Verda's own reason. Do not assume"
+            echo "it is the balance; the first two misses were an image Verda does"
+            echo "not allow on this GPU."
             else
               echo "The run failed. If the log says FEED DEAD, the availability"
               echo "query is broken and the watcher is blind - it will report"

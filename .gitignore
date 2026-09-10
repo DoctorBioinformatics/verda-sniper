@@ -2,3 +2,6 @@ BOOKED.json
 issue.md
 __pycache__/
 *.pyc
+INSTANCE_EXISTS
+BOOK_FAILED.json
+alert.md
